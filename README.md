@@ -19,7 +19,7 @@ Default:
 2000 500 250 3000
 ```
   
-### To launch with Windows:
+### To launch with Windows (important if you keep overclock at all times):
 Put the .exe (or shortcut if using custom launch parameters) to 
 ```
 %ProgramData%\Microsoft\Windows\Start Menu\Programs\StartUp
