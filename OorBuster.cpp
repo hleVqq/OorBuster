@@ -2,6 +2,8 @@
 #include <tchar.h>
 #include <shellapi.h>
 #include <lowlevelmonitorconfigurationapi.h>
+#include <string>
+#include <Tlhelp32.h>
 
 #include "resource.h"
 
@@ -12,7 +14,9 @@ const BYTE VCP_AMA = 0xF0;
 enum
 {
 	WM_APP_RELOAD = WM_APP + 1,
-	WM_APP_EXIT
+	WM_APP_EXIT,
+	WM_APP_NEXT_MODE,
+	WM_APP_PREV_MODE
 };
 
 DWORD CachedOsdLanguage = 2;
@@ -50,10 +54,13 @@ HANDLE GetPhysicalMonitor()
 	return pm;
 }
 
-void CacheVcpValues()
+void CachePhysicalMonitor()
 {
 	Monitor = GetPhysicalMonitor();
+}
 
+void CacheVcpValues()
+{
 	GetVCPFeatureAndVCPFeatureReply(Monitor, VCP_OSD_LANGUAGE, NULL, &CachedOsdLanguage, NULL);
 	GetVCPFeatureAndVCPFeatureReply(Monitor, VCP_PICTURE_MODE, NULL, &CachedPictureMode, NULL);
 	GetVCPFeatureAndVCPFeatureReply(Monitor, VCP_AMA, NULL, &CachedAma, NULL);
@@ -77,6 +84,22 @@ inline void FixOor() {SetVCPFeature(Monitor, VCP_OSD_LANGUAGE, CachedOsdLanguage
 inline void FixPic() {SetVCPFeature(Monitor, VCP_PICTURE_MODE, CachedPictureMode);}
 inline void FixAma() {SetVCPFeature(Monitor, VCP_AMA, CachedAma);}
 
+void NextMode()
+{
+	CachePhysicalMonitor();
+	CacheVcpValues();
+	CachedPictureMode++;
+	FixPic();
+}
+
+void PrevMode()
+{
+	CachePhysicalMonitor();
+	CacheVcpValues();
+	CachedPictureMode--;
+	FixPic();
+}
+
 void ApplyVcpValues(bool wake = false)
 {
 	if (GetRefreshRate() <= 144)
@@ -97,6 +120,8 @@ void ShowTrayMenu(HWND wnd)
 
 	HMENU menu = CreatePopupMenu();
 	InsertMenu(menu, -1, MF_BYPOSITION, WM_APP_RELOAD, L"Reload");
+	InsertMenu(menu, -1, MF_BYPOSITION, WM_APP_NEXT_MODE, L"Next Mode");
+	InsertMenu(menu, -1, MF_BYPOSITION, WM_APP_PREV_MODE, L"Prev Mode");
 	InsertMenu(menu, -1, MF_BYPOSITION, WM_APP_EXIT, L"Exit");
 	SetForegroundWindow(wnd);
 	TrackPopupMenu(menu, TPM_BOTTOMALIGN, pos.x, pos.y, 0, wnd, NULL);
@@ -108,6 +133,7 @@ LRESULT CALLBACK WindowProc(_In_ HWND wnd, _In_ UINT msg, _In_ WPARAM wParam, _I
 	switch (msg)
 	{
 	case WM_DISPLAYCHANGE:
+		CachePhysicalMonitor();
 		ApplyVcpValues();
 
 		break;
@@ -120,7 +146,10 @@ LRESULT CALLBACK WindowProc(_In_ HWND wnd, _In_ UINT msg, _In_ WPARAM wParam, _I
 			DWORD status = *(DWORD*)(pbs->Data);
 
 			if (status == DISPLAY_ON)
+			{
+				CachePhysicalMonitor();
 				ApplyVcpValues(true);
+			}
 		}
 
 		break;
@@ -139,8 +168,16 @@ LRESULT CALLBACK WindowProc(_In_ HWND wnd, _In_ UINT msg, _In_ WPARAM wParam, _I
 		switch (LOWORD(wParam))
 		{
 		case WM_APP_RELOAD:
+			CachePhysicalMonitor();
+			FixOor();
 			CacheVcpValues();
 
+			break;
+		case WM_APP_NEXT_MODE:
+			NextMode();
+			break;
+		case WM_APP_PREV_MODE:
+			PrevMode();
 			break;
 		case WM_APP_EXIT:
 			Shell_NotifyIcon(NIM_DELETE, &TrayIcon);
@@ -155,6 +192,22 @@ LRESULT CALLBACK WindowProc(_In_ HWND wnd, _In_ UINT msg, _In_ WPARAM wParam, _I
 		PostQuitMessage(0);
 
 		break;
+	case WM_HOTKEY:
+		switch (wParam)
+		{
+		case 1000:
+			{
+				OutputDebugString(L"[DEBUG] HOTKEY!\n");
+				CachePhysicalMonitor();
+
+				DWORD origOorDelay = OorDelay;
+				OorDelay = 0;
+				ApplyVcpValues();
+				OorDelay = origOorDelay;
+			}
+
+			break;
+		}
 	}
 
 	return DefWindowProc(wnd, msg, wParam, lParam);
@@ -186,14 +239,50 @@ void CreateTrayIcon(HWND wnd, HICON icon)
 	Shell_NotifyIcon(NIM_ADD, &TrayIcon);
 }
 
-int WINAPI WinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int showFlag)
+void KillOtherInstances()
 {
+	DWORD id = GetCurrentProcessId();
+
+	WCHAR path[MAX_PATH]; 
+	GetModuleFileName(NULL, path, MAX_PATH);
+
+	WCHAR file[_MAX_FNAME]; 
+	_wsplitpath_s(path, NULL, 0, NULL, 0, file, ARRAYSIZE(file), NULL, 0); 
+	wcscat_s(file, ARRAYSIZE(file), L".exe");
+
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPALL, NULL);
+
+	PROCESSENTRY32 entry; 
+	entry.dwSize = sizeof(entry);
+
+	for (BOOL res = Process32First(snapshot, &entry); res; res = Process32Next(snapshot, &entry))
+	{
+		if (wcscmp(entry.szExeFile, file) == 0)
+		{
+			HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, entry.th32ProcessID);
+
+			if (process != nullptr && entry.th32ProcessID != id)
+			{
+				TerminateProcess(process, 9);
+				CloseHandle(process);
+			}
+		}
+	}
+
+	CloseHandle(snapshot);
+}
+
+int WINAPI WinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int)
+{
+	KillOtherInstances();
+	CachePhysicalMonitor();
 	CacheVcpValues();
 	ReadLaunchParams();
 
 	HWND wnd = CreateMainWindow(instance);
 	CreateTrayIcon(wnd, LoadIcon(instance, MAKEINTRESOURCE(IDI_ICON1)));
 	RegisterPowerSettingNotification(wnd, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+	RegisterHotKey(wnd, 1000, MOD_ALT, VK_HOME);
 
 	MSG msg;
 
